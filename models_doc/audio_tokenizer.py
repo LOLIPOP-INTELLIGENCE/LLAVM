@@ -142,9 +142,128 @@ class RQBottleneckTransformer(nn.Module):
             project_out = getattr(self.rq, 'project_out', None) or self.rq.layers[0].project_out
             if self.tunables.mask_embs:
                 x[~mask] = project_out(self.rq.layers[0]._codebook.embed[0, self.vq_codes])
-                x = x + self.positional_embeding(self.positions.to(x.device))
-                x = self.ln_post(self.out_blocks(x))
-            
+            x = x + self.positional_embeding(self.positions.to(x.device))
+            x = self.ln_post(self.out_blocks(x))
+        logits = self.whmodel[0].decoder(input_toks, embs if self.no_quantize else x)
+        self.ce_loss = self.ce_lossf(logits.view(-1,logits.shape[-1]), output_toks.view(-1))
+        self.kl_loss = self.kl_lossf(F.log_softmax(logits, dim=-1), F.softmax(teacher_logits, dim=-1))
+        loss = self.ce_loss + self.kl_loss_mul * self.kl_loss
+        if not self.no_quantize: loss += self.commit_loss
+        x = None
+        if self.no_quantize: loss = loss + self.fake_parameter
+        
+        if not self.training:
+            valid_toks = output_toks != -100
+            self.val_true += (logits.detach().argmax(-1)[valid_toks] == output_toks[valid_toks]).float().sum()
+            self.val_total += valid_toks.float().sum()
+
+        return x, logits, loss
+
+
+
+    def get_metrics(self):
+        metrics = {
+            'acc_0': (self.val_true / self.val_total).item(),
+        }
+        self.val_true[:] = 0
+        self.val_total[:] = 0
+        return metrics       
+
+
+###########Inference #################
+    @classmethod
+    def load_model(cls, ref="collabora/spear-tts-pytorch:whisper-vq-stoks-medium-en+pl.model",
+                   repo_id=None, filename=None, local_filename=None):
+        if repo_id is None and filename is None and local_filename is None:
+            if ":" in ref:
+                repo_id, filename = ref.split(":", 1)
+            else:
+                local_filename = ref
+        if not local_filename:
+            local_filename = hf_hub_download(repo_id=repo_id, filename=filename)
+        spec = torch.load(local_filename) 
+        vqmodel = cls(**spec['config'], tunables=Tunables(**Tunables.upgrade(spec.get('tunables', {}))))
+        vqmodel.load_state_dict(spec['state_dict'])
+        vqmodel.eval()
+        return vqmodel
+
+
+    def load_checkpoint(self, local_filename):
+        spec = torch.load(local_filename, map_location = 'cpu')
+        assert 'pytorch-lightning-version' in spec, "Not a valid pytorch-lightning checkpoint"
+        state_dict = {k.replace('model',''):v for k,v in spec['state_dict'].items()}
+        self.load_state_dict(state_dict)
+        return self
+
+
+    def save_model(self, fname, store_parameters = True):
+        torch.save(dict(config = self.__stored_args__, tunables =dataclasses.asdict(self.tunables),state_dict = self.state_dict() if store_parameters else None), fname)
+
+    def ensure_whisper(self, device= None):
+        if self.whmodel is not None:
+            return
+        device = device or self.device
+        if self.whmodel is None: #If no whisper model is loaded, load it
+            self.whmodel = [whisper.load_model(self.whisper_model_name, device=device)]
+
+        self.decoding_options = whisper.DecodingOptions()
+        self.tokenizer = get_tokenizer(self.whisper_model_name, None)
+
+    def quantize(self, embs):
+        x=  self.downsample_embeddings(embs)
+        x = x+self.mlp(self.mlp_ln(x))
+        _, stoks = self.rq(x)
+        if self.q_depth == 1:
+            stoks = stoks.squeeze(-1)
+        return stoks
+
+    def dequantize(self,stoks):
+        assert self.q_depth == 1 #What is q depth
+        assert len(stoks.shape) == 1, "batch processing is not supported"
+        if ininstance(stoks, np.ndarray):
+            stoks = torch.tensor(stoks)
+            # Remove padding
+            padding = torch.nonzero(stoks == self.vq_codes)
+            if padding.any(): stoks = stoks[:padding[0,0]]
+            stoks = F.pad(stoks,, (0, self.stoks_len - stols.shape[-1]), #Why repad?
+            value = self.vq_codes if self.tunables.mask_embs else 0)
+            x = self.rq_layers[0]._codebook.embed[0, stoks.to(torch.long).view(-1)]
+            x = x.repeat_interleave(self.downsample, -2)
+            project_out = getattr(self.rq, 'project_out', None) or self.rq.layers.project_out #Why the or?
+            x = project_out(x).unsqueeze(0)
+            positions = torch.arange(0, x.shape[-2], dtype=  torch.long, device = x.device)
+            x = x + self.positional_embedding(positions)
+            return self.ln_post(self.out_blocks(x))
+    def encode_audio(self, audio):
+        if isinstance(audio, str):
+            x, sr = torchaudio.load(audio)
+            x = torchaudio.transforms.Resaple(sr, 16000)(x)[0]
+            audio = x.unsqueeze(0)
+        return self.encode_mel(self.log_mel_spectrogram(audio).to(self.device))
+
+    def encode_mel(self, mel):
+        assert len(mel.shape) == 3, "invalid mel spec shape"
+        self.ensure_whisper()
+        n = mel.shape[-1] // self.stoks_len
+        if n > whisper.audio.N_FRAMES:
+            padding = 0
+            padded = mel[:,:,:whisper.audio.N_FRAMES]
+        else:
+            padding = -n %whisper.audio.N_FRAMES
+            padded = F.pad(mel, (0, padding), value=  -1.5)
+        embs = self.whmodel[0].encoder(padded) #.to(self.whmodel[0].device)#[:,:n//2]
+        stoks = self.quantize(embs)
+        if self.tunables.mask_embs:
+            return stoks[:,:n//2//self.downsample]
+        else:
+            return stoks
+
+    def decode_text(self, stoks, decoding_options=  None):
+        self.ensure_whisper(self.device)
+        if decoding_options is None:
+            decoding_options = self.decoding_options
+        embs = self.dequantize(stoks).to(self.whmodel[0].device)
+        return self.whmodel[0].decode(embs, decoding_options)
 
 
 
