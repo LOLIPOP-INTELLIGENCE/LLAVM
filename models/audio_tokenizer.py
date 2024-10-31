@@ -1,7 +1,7 @@
-from whisperspeech.vqstoks import RQBottleneckTransformer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from whisperspeech.vq_stoks import RQBottleneckTransformer
 
 class AudioProjector(nn.Module):
     def __init__(self, num_tokens, emb_dim, num_heads, num_layers):
@@ -34,4 +34,3 @@ class MLP(nn.Module):
         x = self.proj2(x)
         x = self.gelu2(x)
         return x
-
