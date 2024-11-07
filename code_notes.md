@@ -43,6 +43,40 @@ Just changes the config.....
 
 ### class LLavaMetaForCasualLM(ABC)
 
+- ABC inherits (Abstract Base Class)
+
+#### Options for vision module
+
+Patch Merge Types:
+
+- flat -> Takes all image patches and flatten them into a single sequence (4x4 grid -> 16 length seq)
+- spatial -> Preserves 2D spatial relationships between patches (4x4 grid -> 4x4 length seq with new line tokens in btwn)
+- unpad -> Removes padding that was added to make images square
+
+```
+[Pad Pad Pad]     [P1 P2]
+[P1  P2  Pad]  →  [P3 P4]
+[P3  P4  Pad]
+```
+
+- maxpool2x2
+Applies max pooling to reduce spatial dimensions by half (4x4 grid -> 2x2 grid)
+
+Image Aspect Ratio Options:
+
+- square: Force images to be square
+- anyres: Handles images of any res and preserves aspect ratio
+- anyres_max_*: Like anyres but with max limit on patches
+
+Token Position Options:
+
+- grid: Adds position token based on 2D grid location
+- frame: Add pos tokens per frame
+- one_token: Add single positon token for entire image
+- no_token:No additional positional tokens
+
+#### Functions
+
 - get_2dpool -> Init the 2dpooling functions for slowfast (Aggregator)
 - encode_images-> Encode images function to pass through encoder
 - encode_multimodal -> Encode multimodal encodes the images, and then does the appropriate pooling depending on the stream. It also finds out based on the video_idx which tokens represent video tokens
@@ -56,4 +90,36 @@ Just changes the config.....
 ----> If no vision and audio, return
 ----> If only audio, encode the audio, take note of positions of audio and continue
 ----> If vision:
-      ---->
+      ----> Turn modalities into a list
+      ----> Processes both single images and videos to have consistent size
+            - Example:
+              # Example input images list might look like:
+                  images = [
+                      torch.tensor(...),  # shape: (3, 224, 224)     - needs unsqueeze
+                      torch.tensor(...),  # shape: (1, 3, 224, 224)  - already correct
+                      torch.tensor(...),  # shape: (3, 224, 224)     - needs unsqueeze
+                  ]
+                  # After the list comprehension:
+                  images = [
+                      torch.tensor(...),  # shape: (1, 3, 224, 224)  - unsqueezed
+                      torch.tensor(...),  # shape: (1, 3, 224, 224)  - unchanged
+                      torch.tensor(...),  # shape: (1, 3, 224, 224)  - unsqueezed
+                  ]
+      -----> Track indices of video tokens
+      -----> Do final formatting of image and video tokens
+                Example:
+                    Input could be:
+                        images = [
+                            tensor(1, 3, 224, 224),     # 4D: batched image
+                            tensor(8, 3, 224, 224),     # 4D: video frames
+                            tensor(5, 1, 3, 224, 224)   # 5D: batch of videos
+                        ]
+                    After processing
+                        images_list = [
+                            tensor(1, 3, 224, 224),     # Unchanged
+                            tensor(8, 3, 224, 224),     # Unchanged
+                            tensor(5, 1, 3, 224, 224)   # Unsqueezed to add batch dim
+                        ]
+      -----> Concat all images for batch processing
+      -----> Then, take note of how many batches per image/video
+      -----> Encode all features through visual encoder, then split back to images and videos
