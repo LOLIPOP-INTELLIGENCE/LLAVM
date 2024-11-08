@@ -31,26 +31,31 @@ from llava.utils import rank0_print, rank_print
 import random
 
 
+# handles init for all 3 components of the vision processing: vision tower, resampler and projector
 class LlavaMetaModel:
 
     def __init__(self, config):
         super(LlavaMetaModel, self).__init__(config)
 
+        # sets up the vision tower, resampler and multi-modal projector with configs provided
         if hasattr(config, "mm_vision_tower"):
             delay_load = getattr(config, "delay_load", False)
             self.vision_tower = build_vision_tower(config, delay_load=delay_load)
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
             self.mm_projector = build_vision_projector(config, vision_cfg=self.vision_tower.config)
 
+            # image new line param for unpadded patches (when image is not a square and needs a patch: [p1, p2, p3, ..., IN, p87, p88, ..., IN, p156, ...])
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))
 
+    # provides access to the vision tower
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
 
+    # vision tower config and loading
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
@@ -61,12 +66,14 @@ class LlavaMetaModel:
         self.config.mm_vision_tower = vision_tower
         self.config.vision_tower_pretrained = getattr(model_args, "vision_tower_pretrained", "")
 
+        # get configs and build vision tower
         if self.get_vision_tower() is None:
             vision_tower = build_vision_tower(model_args)
             vision_resampler = build_vision_resampler(model_args, vision_tower=vision_tower)
             for k, v in vision_resampler.config.items():
                 setattr(self.config, k, v)
 
+            # FSDP (Fully Shared Data Parallel) is used for distributed training across multiple GPUs by sharding model params, gradients, etc
             if fsdp is not None and len(fsdp) > 0:
                 self.vision_tower = [vision_tower]
                 self.vision_resampler = [vision_resampler]
@@ -94,6 +101,14 @@ class LlavaMetaModel:
         self.config.mm_patch_merge_type = mm_patch_merge_type
 
         
+        # add a token to indicate fast video token
+        # Video frames: [F1, F2, F3, F4, F5, F6]
+        # Slow pathway: [F1,     F3,     F5    ] (every other frame, full resolution)
+        # Fast pathway: [F1, F2, F3, F4, F5, F6] (every frame, lower resolution)
+
+        # With tokens might look like:
+        # [F1_slow, FT, F2_fast, F3_slow, FT, F4_fast, F5_slow, FT, F6_fast]
+        # where FT is the faster_token
         if not hasattr(self.config, 'add_faster_video'):
             if model_args.add_faster_video:
                 embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
@@ -101,9 +116,11 @@ class LlavaMetaModel:
                     torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
                 )
 
+        # build vision projector
         if getattr(self, "mm_projector", None) is None:
             self.mm_projector = build_vision_projector(self.config, vision_cfg=vision_tower.config)
 
+            # handle unpadded processing
             if "unpad" in mm_patch_merge_type:
                 embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
                 self.image_newline = nn.Parameter(torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std)
@@ -123,7 +140,9 @@ class LlavaMetaModel:
             incompatible_keys = self.vision_resampler.load_state_dict(get_w(mm_projector_weights, "vision_resampler"), strict=False)
             rank0_print(f"Loaded vision resampler weights from {pretrain_mm_mlp_adapter}. Incompatible keys: {incompatible_keys}")
 
-
+# vision transformers usually need square inputs so non square inputs are padded
+# but after the necessary processing is done, we need to unpad the portions we padded to maintain the original aspect ratio
+# unpad_image unpads any padding that was added to the image
 def unpad_image(tensor, original_size):
     """
     Unpads a PyTorch tensor of a padded and resized image.
@@ -161,19 +180,23 @@ def unpad_image(tensor, original_size):
 
 class LlavaMetaForCausalLM(ABC):
 
+    # abstract method needs to be implemented
     @abstractmethod
     def get_model(self):
         pass
 
+    # helper method to access vision tower
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    # implementation for 2D pooling
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
         image_feature = image_feature.view(num_frames, height, width, -1)
         image_feature = image_feature.permute(0, 3, 1, 2).contiguous()
         # image_feature = nn.functional.max_pool2d(image_feature, self.config.mm_spatial_pool_stride)
+        # support for different types of pooling
         if self.config.mm_spatial_pool_mode == "average":
             image_feature = nn.functional.avg_pool2d(image_feature, stride)
         elif self.config.mm_spatial_pool_mode == "max":
@@ -189,6 +212,7 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.view(num_frames, -1, num_dim)
         return image_feature
 
+    # encodes images by passing it through vision tower, and then through multimodal projector
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         # image_features = self.get_model().vision_resampler(image_features, images=images)
@@ -196,22 +220,27 @@ class LlavaMetaForCausalLM(ABC):
         return image_features
     
     def encode_multimodals(self, videos_or_images, video_idx_in_batch, split_sizes=None):
+        # handles both videos and images
         videos_or_images_features = self.get_model().get_vision_tower()(videos_or_images)
+        # splits features based on batch size
         per_videos_or_images_features = torch.split(videos_or_images_features, split_sizes, dim=0)  # tuple, (dim_1, 576, 4096)
         all_videos_or_images_features = []
         all_faster_video_features = []
         cur_mm_spatial_pool_stride = self.config.mm_spatial_pool_stride
 
         for idx, feat in enumerate(per_videos_or_images_features):
-            
+             # project each feature through mm projector        
             feat = self.get_model().mm_projector(feat)
             faster_video_feature = 0
             slower_img_feat = 0
             if idx in video_idx_in_batch and cur_mm_spatial_pool_stride > 1:
+                # slower image is pooled with a stride of cur_mm_spatial_pool_stride
                 slower_img_feat = self.get_2dPool(feat,cur_mm_spatial_pool_stride)
+                # faster video is pooled with a stride of cur_mm_spatial_pool_stride * 2
                 if self.config.add_faster_video:
                     cur_mm_spatial_pool_stride = cur_mm_spatial_pool_stride * 2
                     faster_video_feature = self.get_2dPool(feat,cur_mm_spatial_pool_stride)
+            # append all fast and slow video tokens
             if slower_img_feat is not 0:
                 all_videos_or_images_features.append(slower_img_feat)
             else:
@@ -219,17 +248,20 @@ class LlavaMetaForCausalLM(ABC):
             all_faster_video_features.append(faster_video_feature)
         return all_videos_or_images_features,all_faster_video_features
 
+    # preserves spatial relation
     def add_token_per_grid(self, image_feature):
+        # [32, 196, 1024] → [32, 14, 14, 1024]
         resize_h = int(math.sqrt(image_feature.shape[1]))
         num_frames = image_feature.shape[0]
         feature_dim = image_feature.shape[-1]
 
         image_feature = image_feature.view(num_frames, 1, resize_h, resize_h, -1)
+
         image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+        # add new line token after each grid position
         image_feature = torch.cat((image_feature, self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
         if getattr(self.config, "add_faster_video", False):
-            # import pdb; pdb.set_trace()
             # (3584, 832, 14) -> (3584, 64, 13, 14)
             image_feature = image_feature.view(feature_dim, num_frames,resize_h, -1)
             #  (3584, 64, 13, 14) -> (64, 13, 14, 3584)
@@ -242,6 +274,7 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.flatten(1, 2).transpose(0, 1)
         return image_feature
 
+    # unlike add_token_per_grid where a token is added after every grid, in add_token_per_frame, a token is added after every frame: [frame1_features, token1, frame2_features, token2, ...]
     def add_token_per_frame(self, image_feature):
         image_feature = image_feature.permute(2, 0, 1).contiguous()
         image_feature =  torch.cat((image_feature, self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
