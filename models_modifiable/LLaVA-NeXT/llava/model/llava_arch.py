@@ -20,11 +20,11 @@ import re
 import time
 import torch
 import torch.nn as nn
-from .multimodal_encoder.builder import build_vision_tower
+from .multimodal_encoder.builder import build_vision_tower, build_audio_encoder
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
 
-from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, AUDIO_TOKEN_INDEX
 
 from llava.mm_utils import get_anyres_image_grid_shape
 from llava.utils import rank0_print, rank_print
@@ -48,12 +48,19 @@ class LlavaMetaModel:
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))
 
+        if hasattr(config, "mm_audio_encoder"):
+            self.audio_encoder = build_audio_encoder(config)
+
     # provides access to the vision tower
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
+    
+    def get_audio_encoder(self):
+        audio_encoder = getattr(self, "audio_encoder", None)
+        return audio_encoder    
 
     # vision tower config and loading
     def initialize_vision_modules(self, model_args, fsdp=None):
@@ -140,6 +147,46 @@ class LlavaMetaModel:
             incompatible_keys = self.vision_resampler.load_state_dict(get_w(mm_projector_weights, "vision_resampler"), strict=False)
             rank0_print(f"Loaded vision resampler weights from {pretrain_mm_mlp_adapter}. Incompatible keys: {incompatible_keys}")
 
+
+    def initialize_audio_modules(self, model_args):
+        audio_encoder = model_args.audio_encoder
+
+        setattr(self.config, "mm_audio_encoder", audio_encoder)
+
+        if self.get_audio_encoder() is None:
+            #            audio_encoder = build_audio_encoder(model_args)
+            audio_encoder = build_audio_encoder(self.config)
+            self.audio_encoder = audio_encoder
+
+        # from safetensors.torch import load_file
+        # import os
+        # audio_weights = {}
+        # import pdb; pdb.set_trace()
+        # for file_name in os.listdir(model_args.model_name_or_path):
+        #    if file_name.endswith('safetensors'):
+        #        audio_weights.update(
+        #            {k[20:]: v for k, v in load_file(os.path.join(model_args.model_name_or_path, file_name)).items() if
+        #                k.startswith('model.audio_encoder.')})
+        # import pdb; pdb.set_trace()
+        # self.audio_encoder.load_state_dict(audio_weights, strict=True)
+
+        checkpoint = torch.load(model_args.audio_encoder + "/final.pt", map_location="cpu")
+        model_dict = self.audio_encoder.state_dict()
+        for key in model_dict.keys():
+            if key in checkpoint.keys():
+                if model_dict[key].shape == checkpoint[key].shape:
+                    model_dict[key] = checkpoint[key]
+                else:
+                    print(
+                        "Key {} has different shape, {} VS {}".format(
+                            key, model_dict[key].shape, checkpoint[key].shape
+                        )
+                    )
+            else:
+                print("Key {} has not in resume model".format(key))
+        # import pdb; pdb.set_trace()
+        self.audio_encoder.load_state_dict(model_dict)            
+
 # vision transformers usually need square inputs so non square inputs are padded
 # but after the necessary processing is done, we need to unpad the portions we padded to maintain the original aspect ratio
 # unpad_image unpads any padding that was added to the image
@@ -188,6 +235,9 @@ class LlavaMetaForCausalLM(ABC):
     # helper method to access vision tower
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
+    
+    def get_audio_encoder(self):
+        return self.get_model().get_audio_encoder()    
 
     # implementation for 2D pooling
     def get_2dPool(self, image_feature, stride=2):
@@ -282,22 +332,18 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
 
-   def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, audio, modalities=["image", "audio"], image_sizes=None):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, audio, modalities=["image", "audio"], image_sizes=None):
         vision_tower = self.get_vision_tower()
-        audio_tower = self.get_audio_tower()
+        audio_tower = self.get_audio_encoder()
         # rank_print(modalities)
         if (vision_tower is None or images is None or input_ids.shape[1] == 1) and (audio_tower is None or audio is None or input_ids.shape[1] == 1):
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
         if audio_tower is not None and audio is not None:
             # This is if only audio exists
             # VIM_JUMP: This comment is to autojump back to audio encoder code
-            audio_features = []
-            for audio_file in audio:
-                # Loads audio into tensor
-                cur_audio_features = self.get_audio_tower().load_audio(audio_file)
-                audio_features.append(cur_audio_features)
             # Init lists for new embeddings and labels
             # Process each sequence in the batch
+            audio_features = audio_tower(audio["audios"], audio["lengths"])
         if vision_tower is not None and images is not None:
             if isinstance(modalities, str):
                 modalities = [modalities]
@@ -495,6 +541,7 @@ class LlavaMetaForCausalLM(ABC):
                 # rank0_print(num_images)
                 if num_images == 0 and num_audio_frames == 0:
                     cur_image_features = image_features[cur_image_idx]
+                    cur_audio_features = audio_features["inputs_embeds"][cur_audio_idx]
                     cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
                     cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0], cur_audio_features[0:0]], dim=0)
                     new_input_embeds.append(cur_input_embeds)
@@ -516,7 +563,7 @@ class LlavaMetaForCausalLM(ABC):
                 cur_new_input_embeds = []
                 cur_new_labels = []
 
-                for i in range(num_images + 1):
+                for i in range(num_images + num_audio_frames + 1):
                     cur_new_input_embeds.append(cur_input_embeds_no_im_no_au[i])
                     cur_new_labels.append(cur_labels_noim_noau[i])
                     if i < num_images + num_audio_frames:
@@ -526,14 +573,14 @@ class LlavaMetaForCausalLM(ABC):
                             cur_image_idx += 1
                             cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
                         elif cur_input_ids[image_audio_token_indices[i + 1]] == AUDIO_TOKEN_INDEX:
-                            cur_audio_features = audio_features[cur_audio_idx]
+                            cur_audio_features = audio_features["inputs_embeds"][cur_audio_idx]
                             cur_new_input_embeds.append(cur_audio_features)
                             cur_audio_idx += 1
                             cur_new_labels.append(torch.full((cur_audio_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))  # Need to check why do this
                         else:
                             raise ValueError("Unexpected token after image token")
                 if num_images != 0 and num_audio_frames == 0:
-                    cur_audio_features = audio_features[cur_audio_idx]
+                    cur_audio_features = audio_features["inputs_embeds"][cur_audio_idx]
                     cur_audio_idx += 1
                     cur_new_input_embeds.append(cur_audio_features[0:0])
                 elif num_images == 0 and num_audio_frames != 0:

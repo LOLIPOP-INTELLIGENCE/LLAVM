@@ -6,6 +6,8 @@ from .hf_vision import HFVisionTower
 from .siglip_encoder import SigLipVisionTower
 from .clip_encoder import CLIPVisionTower, CLIPVisionTowerS2
 
+import yaml
+from .whale.init_model import init_model
 # from .eva_clip.eva_clip_encoder import EvaClipVisionTower
 # from .dev_eva_clip.eva_vit import EvaViTWrapper
 
@@ -33,3 +35,21 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
     #     return EvaViTWrapper(vision_tower, args=vision_tower_cfg, **kwargs)
 
     raise ValueError(f"Unknown vision tower: {vision_tower}")
+
+
+def build_audio_encoder(audio_encoder_config, **kwargs):
+    with open(audio_encoder_config.mm_audio_encoder + "/train.yaml", "r") as fin:
+        configs = yaml.load(fin, Loader=yaml.FullLoader)
+
+    configs["cmvn_file"] = audio_encoder_config.mm_audio_encoder + "/global_cmvn"
+
+    #    configs['model_conf']['freeze_encoder'] = audio_encoder_config.freeze_audio_encoder
+    #    configs['model_conf']['freeze_adpter'] = audio_encoder_config.freeze_audio_encoder_adapter
+    configs["model_conf"]["freeze_encoder"] = getattr(
+        audio_encoder_config, "freeze_audio_encoder", True
+    )
+    configs["model_conf"]["freeze_adpter"] = getattr(
+        audio_encoder_config, "freeze_audio_encoder_adapter", True
+    )
+
+    return init_model(configs)
