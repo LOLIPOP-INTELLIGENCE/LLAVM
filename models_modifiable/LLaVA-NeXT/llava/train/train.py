@@ -39,12 +39,12 @@ import deepspeed
 
 from transformers import AutoConfig
 from torch.utils.data import Dataset
-from llava.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_TOKEN_INDEX
+from llava.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_TOKEN_INDEX, DEFAULT_AUDIO_TOKEN, DEFAULT_AUDIO_START_TOKEN, DEFAULT_AUDIO_END_TOKEN, AUDIO_TOKEN_INDEX
 from llava.train.llava_trainer import LLaVATrainer
 
 from llava import conversation as conversation_lib
 from llava.model import *
-from llava.mm_utils import process_highres_image, process_anyres_image, process_highres_image_crop_split, tokenizer_image_token
+from llava.mm_utils import process_highres_image, process_anyres_image, process_highres_image_crop_split, tokenizer_image_token, tokenizer_audio_token, tokenizer_multimodal_token
 from llava.utils import rank0_print, process_video_with_pyav, process_video_with_decord
 
 torch.multiprocessing.set_sharing_strategy("file_system")
@@ -403,7 +403,7 @@ def preprocess_multimodal(sources: Sequence[str], data_args: DataArguments) -> D
     return sources
 
 
-def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, has_audio: bool = False) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -422,9 +422,15 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    has_mm = has_image or has_audio
+    has_strict_mm = has_image and has_audio
+    if has_mm:
+        if has_strict_mm:
+            input_ids = torch.stack([tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_image:
+            input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_audio:
+            input_ids = torch.stack([tokenizer_audio_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -455,9 +461,16 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
                 break
             parts[0] += sep
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+            if has_mm:
+                if has_strict_mm:
+                    round_len = len(tokenizer_multimodal_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_multimodal_token(rou, tokenizer)) -2
+                elif has_image:
+                    round_len = len(tokenizer_image_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+                elif has_audio:
+                    round_len = len(tokenizer_audio_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_audio_token(parts[0], tokenizer)) - 2
             else:
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
@@ -478,7 +491,7 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
     )
 
 
-def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, has_audio: bool = False) -> Dict:
     conv: conversation_lib.Conversation = conversation_lib.default_conversation.copy()
     roles: Dict[str, str] = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -497,8 +510,15 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-    if has_image:
-        input_ids: torch.Tensor = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    has_mm = has_image or has_audio
+    has_strict_mm = has_image and has_audio
+    if has_mm:
+        if has_strict_mm:
+            input_ids = torch.stack([tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_image:
+            input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_audio:
+            input_ids = torch.stack([tokenizer_audio_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
     else:
         input_ids: torch.Tensor = tokenizer(
             conversations,
@@ -533,9 +553,16 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
             parts[0] += sep  # Re-append sep because split on this
             # Now "".join(parts)==rou
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer)) - 1  # Ignore <bos>
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1  # Ignore <bos>
+            if has_mm:
+                if has_strict_mm:
+                    round_len = len(tokenizer_multimodal_token(rou, tokenizer)) - 1
+                    instruction_len = len(tokenizer_multimodal_token(rou, tokenizer)) -1
+                elif has_image:
+                    round_len = len(tokenizer_image_token(rou, tokenizer)) - 1
+                    instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1
+                elif has_audio:
+                    round_len = len(tokenizer_audio_token(rou, tokenizer)) -1
+                    instruction_len = len(tokenizer_audio_token(parts[0], tokenizer)) - 1
             else:
                 round_len = len(tokenizer(rou).input_ids) - 1  # Ignore <bos>
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 1  # Ignore <bos>
@@ -567,8 +594,11 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
     # When there is actually an image, we add the image tokens as a special token
     if has_image:
         tokenizer.add_tokens(["<image>"], special_tokens=True)
+    if has_audio:
+        tokenizer.add_tokens(["<audio>"], special_tokens=True)
 
     image_token_index = tokenizer.convert_tokens_to_ids("<image>")
+    audio_token_index = tokenizer.convert_tokens_to_ids("<audio>")
     im_start, im_end = tokenizer.additional_special_tokens_ids
     # unmask_tokens = ["<|im_start|>", "<|im_start|>", "\n"]
     unmask_tokens_idx =  [198, im_start, im_end]
@@ -605,7 +635,7 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 content = conv["value"]
 
             role =  roles.get(role, role)
-            
+
             conv = [{"role" : role, "content" : content}]
             encode_id = tokenizer.apply_chat_template(conv)
             input_id += encode_id
@@ -613,15 +643,17 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 target += [IGNORE_INDEX] * len(encode_id)
             else:
                 target += encode_id
-        
 
-                    
+
+
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
             if encode_id in unmask_tokens_idx:
                 target[idx] = encode_id
             if encode_id == image_token_index:
                 input_id[idx] = IMAGE_TOKEN_INDEX
+            elif encode_id == audio_token_index:
+                input_id[idx] = AUDIO_TOKEN_INDEX
         input_ids.append(input_id)
         targets.append(target)
     input_ids = torch.tensor(input_ids, dtype=torch.long)
@@ -690,7 +722,7 @@ def preprocess_llama3(
                 content = conv["value"]
 
             role =  roles.get(role, role)
-            
+
             conv = [{"role" : role, "content" : content}]
             # First is bos token we don't need here
             encode_id = tokenizer.apply_chat_template(conv)[1:]
@@ -699,9 +731,9 @@ def preprocess_llama3(
                 target += [IGNORE_INDEX] * len(encode_id)
             else:
                 target += encode_id
-        
 
-                    
+
+
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
             if encode_id in unmask_tokens_idx:
@@ -719,7 +751,7 @@ def preprocess_llama3(
     )
 
 
-def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, has_audio: bool = False) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -738,9 +770,15 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    has_strict_mm = has_image and has_audio
+    has_mm = has_image or has_audio
+    if has_mm:
+        if has_strict_mm:
+            input_ids = torch.stack([tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_image:
+            input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_audio:
+            input_ids = torch.stack([tokenizer_audio_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -771,9 +809,16 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
                 break
             parts[0] += sep
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+            if has_mm:
+                if has_strict_mm:
+                    round_len = len(tokenizer_multimodal_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_multimodal_token(rou, tokenizer)) -2
+                elif has_image:
+                    round_len = len(tokenizer_image_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+                elif has_audio:
+                    round_len = len(tokenizer_audio_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_audio_token(parts[0], tokenizer)) - 2
             else:
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
@@ -798,7 +843,7 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
     )
 
 
-def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, has_audio: bool = False) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -818,8 +863,15 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
 
     # Tokenize conversations
 
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    has_strict_mm = has_image and has_audio
+    has_mm = has_image or has_audio
+    if has_mm:
+        if has_strict_mm:
+            input_ids = torch.stack([tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_image:
+            input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+        elif has_audio:
+            input_ids = torch.stack([tokenizer_audio_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -852,9 +904,16 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
                 break
             parts[0] += sep
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1
+            if has_mm:
+                if has_strict_mm:
+                    round_len = len(tokenizer_multimodal_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_multimodal_token(rou, tokenizer)) - 1
+                elif has_image:
+                    round_len = len(tokenizer_image_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1
+                elif has_audio:
+                    round_len = len(tokenizer_audio_token(rou, tokenizer))
+                    instruction_len = len(tokenizer_audio_token(parts[0], tokenizer)) - 1
             else:
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 1
@@ -892,16 +951,16 @@ def preprocess_plain(
         conversation = source[0]["value"] + source[1]["value"] + conversation_lib.default_conversation.sep
         conversations.append(conversation)
     # tokenize conversations
-    input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
+    input_ids = [tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
     targets = copy.deepcopy(input_ids)
     for target, source in zip(targets, sources):
-        tokenized_len = len(tokenizer_image_token(source[0]["value"], tokenizer))
+        tokenized_len = len(tokenizer_multimodal_token(source[0]["value"], tokenizer))
         target[:tokenized_len] = IGNORE_INDEX
 
     return dict(input_ids=input_ids, labels=targets)
 
 
-def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, has_audio: bool = False) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
     1. Add signal '### ' at the beginning each sentence, with end signal '\n';
@@ -932,10 +991,18 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
 
     # tokenize conversations
     def get_tokenize_len(prompts):
-        return [len(tokenizer_image_token(prompt, tokenizer)) for prompt in prompts]
+        return [len(tokenizer_multimodal_token(prompt, tokenizer)) for prompt in prompts]
+    
+    has_mm = has_image or has_audio
+    has_strict_mm = has_image and has_audio
 
-    if has_image:
-        input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
+    if has_mm:
+        if has_strict_mm:
+            input_ids = [tokenizer_multimodal_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
+        elif has_image:
+            input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
+        elif has_audio:
+            input_ids = [tokenizer_audio_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
     else:
         conversations_tokenized = _tokenize_fn(conversations, tokenizer)
         input_ids = conversations_tokenized["input_ids"]
@@ -1142,7 +1209,7 @@ class LazySupervisedDataset(Dataset):
             if type(image_file) is list:
                 image = [self.process_image(f) for f in image_file]
                 # Handling multi images
-                # overwrite to process with simple pad 
+                # overwrite to process with simple pad
                 if len(image_file) > 1:
                     image = [self.process_image(f, "pad") for f in image_file]
                     image = [[im[0], im[1], "image"] for im in image]
@@ -1170,7 +1237,7 @@ class LazySupervisedDataset(Dataset):
                         num_frames_to_sample = 10
 
                     avg_fps = 2
-                    
+
                     total_frames = len(frame_files)
                     sampled_indices = np.linspace(0, total_frames - 1, num_frames_to_sample, dtype=int)
 
@@ -1606,7 +1673,7 @@ def train(attn_implementation=None):
         model.config.faster_token_stride = model_args.faster_token_stride
         model.config.add_time_instruction = data_args.add_time_instruction
         model.config.force_sample = data_args.force_sample
-        model.config.mm_spatial_pool_stride = model_args.mm_spatial_pool_stride 
+        model.config.mm_spatial_pool_stride = model_args.mm_spatial_pool_stride
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train
