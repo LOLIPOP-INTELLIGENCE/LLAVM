@@ -10,6 +10,7 @@ LLM_VERSION="Qwen/Qwen2-7B-Instruct"
 LLM_VERSION_CLEAN="${LLM_VERSION//\//_}"
 VISION_MODEL_VERSION="google/siglip-so400m-patch14-384"
 VISION_MODEL_VERSION_CLEAN="${VISION_MODEL_VERSION//\//_}"
+AUDIO_MODEL_VERSION="whisperspeech/
 
 ############### Pretrain ################
 
@@ -30,12 +31,14 @@ ACCELERATE_CPU_AFFINITY=1 torchrun --nproc_per_node="${NUM_GPUS}" --nnodes="${NN
     --deepspeed scripts/zero3.json \
     --model_name_or_path $PREV_STAGE_CHECKPOINT \
     --version $PROMPT_VERSION \
-    --data_path /mnt/bn/vl-research/workspace/boli01/projects/LLaVA_Next/scripts/i18n/scale_llms/next_3p2m_single_image.yaml \
-    --image_folder /mnt/bn/vl-research/data/llava_data \
-    --video_folder /mnt/bn/vl-research/data/llava_video \
+    --data_path /home/llavm/LLAVM/models_modifiable/LLaVA_Next/scripts/single_image.yaml \
+    --image_folder /home/llavm/LLAVM/models_modifiable/LLaVA_NEXT/data/llava_data \
+    --video_folder /home/llavm/LLAVM/models_modifiable/LLaVA_NEXT/data/llava_video \
+    --audio folder /home/llavm/LLAVM/models_modifiable/LLaVA_NEXT/data/llava_audio \
     --mm_tunable_parts="mm_vision_tower,mm_mlp_adapter,mm_language_model" \
     --mm_vision_tower_lr=2e-6 \
     --vision_tower ${VISION_MODEL_VERSION} \
+    --audio_tower ${AUDIO_MODEL_VERSION} \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -46,7 +49,7 @@ ACCELERATE_CPU_AFFINITY=1 torchrun --nproc_per_node="${NUM_GPUS}" --nnodes="${NN
     --mm_patch_merge_type spatial_unpad \
     --bf16 True \
     --run_name $RUN_NAME \
-    --output_dir /mnt/bn/vl-research/checkpoints/onevision/$RUN_NAME \
+    --output_dir /home/llavm/LLAVM/models_modifiable/LLaVA_NEXT/checkpoints/onevision/$RUN_NAME \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 4 \

@@ -129,6 +129,7 @@ class DataArguments:
 
     video_folder: Optional[str] = field(default=None)
     video_fps: Optional[int] = field(default=1)
+    audio_folder: Optional[str] = field(default=None)
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
     force_sample: Optional[bool] = field(default=False)
@@ -1203,8 +1204,10 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        has_media = False
 
         if "image" in sources[0]:
+            has_media = True
             image_file = self.list_data_dict[i]["image"]
             if type(image_file) is list:
                 image = [self.process_image(f) for f in image_file]
@@ -1217,7 +1220,8 @@ class LazySupervisedDataset(Dataset):
                 image = [self.process_image(image_file)]
             sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
 
-        elif "video" in sources[0]:
+        if "video" in sources[0]:
+            has_media = True
             video_file = self.list_data_dict[i]["video"]
             video_folder = self.data_args.video_folder
             video_file = os.path.join(video_folder, video_file)
@@ -1272,11 +1276,17 @@ class LazySupervisedDataset(Dataset):
                 print(f"Error: {e}")
                 print(f"Failed to read video file: {video_file}")
                 return self._get_item(i + 1)
-        else:
+        if "audio" in sources[0]:
+            has_media = True
+            audio_tensor = self.process_audio(sources[0]["audio"])
+            sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
+        has_media = True
+        if not has_media:
             sources = copy.deepcopy([e["conversations"] for e in sources])
 
         has_image = ("image" in self.list_data_dict[i]) or ("video" in self.list_data_dict[i])
-        data_dict = preprocess(sources, self.tokenizer, has_image=has_image)
+        has_audio = "audio" in self.list_data_dict[i]
+        data_dict = preprocess(sources, self.tokenizer, has_image=has_image, has_audio= has_audio)
 
         if "prompt" in data_dict:
             prompt = data_dict["prompt"]
@@ -1297,6 +1307,8 @@ class LazySupervisedDataset(Dataset):
             data_dict["image"] = [
                 (torch.zeros(1, 3, crop_size["height"], crop_size["width"]), (crop_size["width"], crop_size["height"]), "text"),
             ]
+        if "audio" in self.list_data_dict[i]:
+            data_dict["audio"] = audio_tensor
         # prompt exist in the data
         if prompt is not None:
             data_dict["prompt"] = prompt
@@ -1304,6 +1316,13 @@ class LazySupervisedDataset(Dataset):
         data_dict["id"] = self.list_data_dict[i].get("id", i)
 
         return data_dict
+    
+    def process_audio(self, audio_file):
+        audio_folder = self.data_args.audio_folder
+        processor = self.data_args.audio_processor
+        audio_file = os.path.join(audio_folder, audio_file)
+        audio = processor.preprocess(audio_file, return_tensors="pt")["input_values"]
+        return audio, "audio"
 
 
 @dataclass
@@ -1346,6 +1365,13 @@ class DataCollatorForSupervisedDataset(object):
             #     batch["images"] = torch.stack(images)
             # else:
             batch["images"] = images
+        
+        if "audio" in instances[0]:
+            audios = [instance["audio"] for instance in instances]
+            batch["modalities"] = [audio[1] for audio in audios]
+            audios = [audio[0] for audio in audios]
+            batch["audios"] = audios
+
 
         if "prompt" in instances[0]:
             batch["prompts"] = [instance["prompt"] for instance in instances]
