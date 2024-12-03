@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 # Load dataset
-dataset = load_dataset("lmms-lab/LLaVA-Video-178K", split="train")
+dataset = load_dataset("lmms-lab/LLaVA-Video-178K", "30_60_s_youtube_v0_1",split="caption")
 
 # Get available audio files
 audio_dir = Path("resampled_audio")
