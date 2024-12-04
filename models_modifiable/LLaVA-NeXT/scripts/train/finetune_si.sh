@@ -22,7 +22,7 @@ echo "BASE_RUN_NAME: ${BASE_RUN_NAME}"
 # Stage 2
 PROMPT_VERSION="qwen_1_5"
 RUN_NAME="llava-onevision-${VISION_MODEL_VERSION_CLEAN}-${LLM_VERSION_CLEAN}-si_stage_am9" 
-PREV_STAGE_CHECKPOINT="/mnt/bn/vl-research/checkpoints/onevision/xxxxxxxxxxxxxxxx" # replace it with your last checkpoint training from mid stage
+#PREV_STAGE_CHECKPOINT="/mnt/bn/vl-research/checkpoints/onevision/xxxxxxxxxxxxxxxx" # replace it with your last checkpoint training from mid stage
 echo "PREV_STAGE_CHECKPOINT: ${PREV_STAGE_CHECKPOINT}"
 echo "MID_RUN_NAME: ${RUN_NAME}"
 
