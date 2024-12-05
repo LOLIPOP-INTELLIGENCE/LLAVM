@@ -1,6 +1,6 @@
-from whisperspeech.t2s_up_wds_mlang_enclm import TSARTransfromer
+from whisperspeech.t2s_up_wds_mlang_enclm import TSARTransformer
 
-class TTSenmanticToken:
+class TTSemanticToken:
     def __init__(self, device: str) -> None:
         self.t2s_model = TSARTransformer.load_model("collabora/whisperspeech:t2s-v1.9-medium-7lang.model", device = device)
         self.t2s_model.optimize(torch_compile=True)
@@ -12,4 +12,4 @@ class TTSenmanticToken:
         Returns:
             torch.Tensor: The generated audio
         """
-        return self.t2s_model.generate(text, lang="en",cps=15, T =0.0, steps=None)
+        return self.t2s_model.generate(text, lang="en",cps=15, T =0.0, step=None)
