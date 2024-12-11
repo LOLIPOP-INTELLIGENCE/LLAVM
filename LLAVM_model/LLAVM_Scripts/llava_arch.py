@@ -23,8 +23,9 @@ import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
+from audio_projection import SemanticProjection
 
-from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_AUDIO_START_TOKEN, DEFAULT_AUDIO_END_TOKEN
+from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
 from llava.utils import rank0_print, rank_print
@@ -44,12 +45,16 @@ class LlavaMetaModel:
 
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))
+                
+        if hasattr(config, "audio_projector"):
+            self.audio_projector = SemanticProjection(config.mm_hidden_size, config.hidden_size)
 
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
+    
 
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
@@ -167,6 +172,7 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
+    
 
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side
@@ -188,6 +194,10 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(0, 2, 3, 1)
         image_feature = image_feature.view(num_frames, -1, num_dim)
         return image_feature
+    
+    def encode_audio(self, audio):
+        audio_features =  self.get_model().audio_projector(audio)
+        return audio_features
 
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
@@ -219,10 +229,6 @@ class LlavaMetaForCausalLM(ABC):
             all_faster_video_features.append(faster_video_feature)
         return all_videos_or_images_features,all_faster_video_features
 
-    def project_audio_tokens(self, audio_tokens):
-        return self.audio_projector(audio_tokens)
-
-
     def add_token_per_grid(self, image_feature):
         resize_h = int(math.sqrt(image_feature.shape[1]))
         num_frames = image_feature.shape[0]
@@ -253,14 +259,13 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities=["image"], image_sizes=None):
-
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
-        if vision_tower is None or images is None or input_ids.shape[1] == 1 or not has_audio:
+        if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-
-
+        if isinstance(modalities, str):
+            modalities = [modalities]
 
         # import pdb; pdb.set_trace()
         if type(images) is list or images.ndim == 5:
@@ -456,7 +461,8 @@ class LlavaMetaForCausalLM(ABC):
             # rank0_print(num_images)
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                cur_input_embeds_1 = self.encode_audio(cur_input_ids)
+                #cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
@@ -464,35 +470,18 @@ class LlavaMetaForCausalLM(ABC):
                 continue
 
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
-            # Get start and end positions
-            audio_starts = torch.where(cur_input_ids == audio_start_token_id)[0]
-            audio_ends = torch.where(cur_input_ids == audio_end_token_id)[0]
-
-            # Create a mask for positions between start and end tokens
-            audio_mask = torch.zeros_like(cur_input_ids, dtype=torch.bool)
-            for start, end in zip(audio_starts, audio_ends):
-                audio_mask[start+1:end] = True
-
-            audio_indices = torch.where(audio_mask).tolist()
-            num_audio = len(audio_indices)
-
-            combined_indices =  audio_indices + image_token_indices
-            combined_indices.sort()
-
-
             cur_input_ids_noim = []
             cur_labels = labels[batch_idx]
             cur_labels_noim = []
-            for i in range(len(combined_indices) - 1):
-                cur_input_ids_noim.append(cur_input_ids[combined_indices[i] + 1 : combined_indices[i + 1]])
-                cur_labels_noim.append(cur_input_ids[combined_indices[i] + 1: combined_indices[i+1]])
-            #for i in range(len(image_token_indices) - 1):
-            #    cur_labels_noim.append(cur_input_ids[image_token_indices[i] +1 : combined_indices[i+1]])
+            for i in range(len(image_token_indices) - 1):
+                cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i + 1]])
+                cur_labels_noim.append(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
+
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
@@ -504,8 +493,6 @@ class LlavaMetaForCausalLM(ABC):
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-
-
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
