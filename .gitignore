@@ -3,3 +3,6 @@
 .venv
 data_gen/processed_dataset/
 data_gen/cached_*
+data_gen/academic_source/
+data_gen/audio/
+data_gen/resampled_audio/
