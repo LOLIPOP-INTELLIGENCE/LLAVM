@@ -35,4 +35,3 @@ def text_to_tokens_to_embeddings(text, cps=15, language="en"):
 # Example usage
 text = "Hello world"
 tokens, embeddings = text_to_tokens_to_embeddings(text)
-import pdb; pdb.set_trace()
