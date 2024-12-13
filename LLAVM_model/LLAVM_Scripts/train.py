@@ -14,6 +14,9 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+from text_to_tokens import TextToTokens
+
+
 import ast
 import os
 import copy
@@ -324,25 +327,49 @@ def smart_tokenizer_and_embedding_resize(
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
 
+semantic_tokenizer = TextToTokens()
+
 def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        )
-        for text in strings
-    ]
-    labels = [tokenized.input_ids[0] for tokenized in tokenized_list]
-    input_ids_lens = labels_lens = [tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item() for tokenized in tokenized_list]
+
+    # Initialize lists to store results
+    input_ids = []
+    input_ids_lens = []
+    
+    # First pass: get semantic tokens and find max length
+    max_len = 0
+    for text in strings:
+        # Generate semantic tokens for each text
+        semantic_tokens, *_ = semantic_tokenizer.generate_semantic_tokens(text)
+        
+        # Handle truncation if needed
+        if len(semantic_tokens[0]) > tokenizer.model_max_length:
+            semantic_tokens = semantic_tokens[:, :tokenizer.model_max_length]
+        
+        cur_len = len(semantic_tokens[0])
+        max_len = max(max_len, cur_len)
+        
+        # Add to results
+        input_ids.append(semantic_tokens[0])  # Remove batch dimension
+        input_ids_lens.append(cur_len)
+    
+    # Second pass: pad sequences to max_len
+    padded_input_ids = []
+    for seq in input_ids:
+        # Calculate padding needed
+        pad_length = max_len - len(seq)
+        if pad_length > 0:
+            # Pad with tokenizer.pad_token_id (usually 0)
+            padded_seq = torch.cat([seq, torch.full((pad_length,), tokenizer.pad_token_id, dtype=seq.dtype, device=seq.device)])
+        else:
+            padded_seq = seq
+        padded_input_ids.append(padded_seq)
+    
     return dict(
-        input_ids=input_ids,
-        labels=labels,
+        input_ids=padded_input_ids,
+        labels=padded_input_ids,  # For causal LM, labels are same as inputs
         input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
+        labels_lens=input_ids_lens,
     )
 
 

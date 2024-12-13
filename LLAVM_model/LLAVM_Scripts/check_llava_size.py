@@ -26,3 +26,7 @@ def inspect_embedding_size(model_name):
         print(f"\nEmbedding weight shape: {emb.weight.shape}")
         # The second dimension is the embedding size
         print(f"Embedding size: {emb.weight.shape[1]}")
+
+
+if __name__ == '__main__':
+    inspect_embedding_size("Qwen/Qwen2-7B")

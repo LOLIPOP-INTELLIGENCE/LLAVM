@@ -9,6 +9,8 @@ from transformers import StoppingCriteria
 from llava.constants import IMAGE_TOKEN_INDEX, AUDIO_TOKEN_INDEX
 
 
+semantic_tokenizer =
+
 def resize_and_center_crop(image, shortest_edge_length):
     # Calculate new dimensions and resize
     aspect_ratio = float(image.width) / float(image.height)
@@ -337,9 +339,42 @@ def process_images(images, image_processor, model_cfg):
         new_images = torch.stack(new_images, dim=0)
     return new_images
 
+def new_tokenizer(text,tokenizer):
+          # Initialize lists to store results
+    input_ids = []
+    input_ids_lens = []
+    
+    # First pass: get semantic tokens and find max length
+    max_len = 0
+    # Generate semantic tokens for each text
+    semantic_tokens, *_ = semantic_tokenizer.generate_semantic_tokens(text)
+    
+    # Handle truncation if needed
+    if len(semantic_tokens[0]) > tokenizer.model_max_length:
+        semantic_tokens = semantic_tokens[:, :tokenizer.model_max_length]
+    
+    cur_len = len(semantic_tokens[0])
+    max_len = max(max_len, cur_len)
+    
+    # Add to results
+    input_ids.append(semantic_tokens[0])  # Remove batch dimension
+    input_ids_lens.append(cur_len)
+
+    # Second pass: pad sequences to max_len
+    padded_input_ids = []
+    for seq in input_ids:
+        # Calculate padding needed
+        pad_length = max_len - len(seq)
+        if pad_length > 0:
+            # Pad with tokenizer.pad_token_id (usually 0)
+            padded_seq = torch.cat([seq, torch.full((pad_length,), tokenizer.pad_token_id, dtype=seq.dtype, device=seq.device)])
+        else:
+            padded_seq = seq
+        padded_input_ids.append(padded_seq)
+
 
 def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")]
+    prompt_chunks = [new_tokenizer(chunk,tokenizer).input_ids for chunk in prompt.split("<image>")]
 
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]

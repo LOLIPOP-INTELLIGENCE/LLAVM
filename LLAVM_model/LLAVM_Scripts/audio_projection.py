@@ -2,11 +2,14 @@ import torch.nn as nn
 import torch.functional as F
 
 
+# batch_size * token_length * 1024
+# 1024 * 1024
+
 class SemanticProjection(nn.Module):
     def __init__(
         self,
-        token_dim,
-        embedding_dim,
+        token_dim=1024,
+        embedding_dim=3584,
         init_scale: float = 0.02
                  ):
         super().__init__()

@@ -116,8 +116,8 @@ def compare_text_and_audio_embeddings(text, audio_path):
 
 # Example usage:
 if __name__ == "__main__":
-    text = "Hello world"
-    audio_path = "input.wav"
+    text = "This dataset contains data to train SPEAR TTS-like text-to-speech models that utilized semantic tokens derived from the OpenAI Whisper speech recognition model."
+    audio_path = "input2.wav"
     
     analysis = compare_text_and_audio_embeddings(text, audio_path)
     import pdb; pdb.set_trace()
