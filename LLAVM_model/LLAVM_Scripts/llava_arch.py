@@ -31,6 +31,17 @@ from llava.mm_utils import get_anyres_image_grid_shape
 from llava.utils import rank0_print, rank_print
 import random
 
+#Edit train.py -> make the tokenizer
+#Change the config so we can train -> add audio projector to sh script
+
+# text -> semantic tokens
+# semantic tokens - [987,63,97] -> 1x3 -> 1x3x784
+# semantic tokens * projection layer -> 
+
+# v2stoks : text -> semantic
+# v2stoks / some other model : semantic -> embedding (vector)
+# our projection layer : embedding -> embedding
+
 
 class LlavaMetaModel:
 

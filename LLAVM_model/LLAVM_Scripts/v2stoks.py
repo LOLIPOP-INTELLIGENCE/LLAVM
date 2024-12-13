@@ -13,3 +13,4 @@ class TTSemanticToken:
             torch.Tensor: The generated audio
         """
         return self.t2s_model.generate(text, lang="en",cps=15, T =0.0, step=None)
+
