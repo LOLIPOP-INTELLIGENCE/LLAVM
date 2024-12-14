@@ -278,6 +278,23 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
+    def split_by_value(self, tensor, split_value = 198):
+        split_indices = (tensor == split_value).nonzero().flatten()
+
+        #Split tensor into chunks
+        res = []
+        start_idx = 0
+
+        for end_idx in split_indices:
+            #Take slice from start_idx to end_idx
+            if end_idx > start_idx:
+                res.append(tensor[start_idx:end_idx])
+            start_idx = end_idx +1
+
+        if start_idx < len(tensor):
+            res.append(tensor[start_idx:])
+        return res
+
     def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities=["image"], image_sizes=None):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
@@ -475,15 +492,23 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+        self.ensure_embeds()
         # rank_print("Inserting Images embedding")
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             # rank0_print(num_images)
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.encode_audio(cur_input_ids)
+                cur_input_splits = self.split_by_value(cur_input_ids)
+                cur_input_embeds_1 = []
+                for split in cur_input_splits:
+                    cur_input_split_embed = self.encode_audio(split)
+                    cur_new_split_embed = torch.cat([self.im_start_embed, cur_input_split_embed, self.im_end_embed],dim = 0)
+                    cur_input_embeds_1.append(cur_new_split_embed)
+                cur_input_embeds_1 = torch.cat(cur_input_embeds_1,dim = 0)
                 #cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
@@ -497,8 +522,33 @@ class LlavaMetaForCausalLM(ABC):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_labels_noim.append(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
             split_sizes = [x.shape[0] for x in cur_labels_noim]
-            cur_input_embeds = self.encode_audio(torch.cat(cur_input_ids_noim))
-            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            '''
+            user <image> Why is the image \n assistant ......
+            user | Why is the image \n assistant ......
+            1. <imse> audio(user) <imee> (continue)
+
+            2. Why is the image | assistant....
+                2a) <im_start_embed>, audio(Why is the image), <im_end_embed>
+                2b) <im_start_embed>, audio(assistant.....), <im_end_embed>
+            3. <imse> audio(Why is the image) <imee> <imse> audio(assistant) <imee>
+
+            Final: <imse> audio(user) <imee> | <.....> | ...... |
+            Labels text: user <IGNORE INDEX> * image features text: Why is the image <IGNORE INDEX>
+            '''
+
+            cur_inp_ids_noim_splits = []
+            for noim in cur_input_ids_noim:
+                cur_inp_ids_noim_splits = self.split_by_value(noim)
+                cur_input_split_embeds = []
+                for split in cur_inp_ids_noim_splits:
+                    # embed and projection together
+                    split_embed = self.encode_audio(split)
+                    cur_split_embed = torch.cat([self.im_start_embed,split, self.im_end_embed],dim = 0)
+                    cur_input_split_embeds.append(cur_split_embed)
+                cur_inp_ids_noim_splits.append(torch.cat(cur_input_split_embeds, dim = 0))
+
+            #cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            cur_input_embeds_no_im = cur_inp_ids_noim_splits
             cur_new_input_embeds = []
             cur_new_labels = []
 
@@ -513,8 +563,7 @@ class LlavaMetaForCausalLM(ABC):
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-            self.ensure_embeds()
-            cur_new_input_embeds = [self.im_start_embed]  + [x.to(self.device) for x in cur_new_input_embeds] + [self.im_end_embed]
+            cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
             # import pdb; pdb.set_trace()
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)

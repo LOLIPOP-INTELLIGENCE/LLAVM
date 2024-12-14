@@ -491,8 +491,6 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 target += encode_id
 
 
-
-        assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
             if encode_id in unmask_tokens_idx:
                 target[idx] = encode_id
@@ -500,80 +498,88 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
                 input_id[idx] = IMAGE_TOKEN_INDEX #-300
         input_ids.append(input_id)
         targets.append(target)
-    input_ids = torch.tensor(input_ids, dtype=torch.long)
-    targets = torch.tensor(targets, dtype=torch.long)
     del tokenizer
-    return dict(
-        input_ids=input_ids,  # tensor(bs x seq_len)
-        labels=targets,  # tensor(bs x seq_len)
-    )
 
-def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, max_len=2048, system_message: str = "You are a helpful assistant.") -> Dict:
-    roles = {"human": "user", "gpt": "assistant"}
-
-    image_token_index = tokenizer.convert_tokens_to_ids("<image>")
-    im_start, im_end = tokenizer.additional_special_tokens_ids
-    # unmask_tokens = ["<|im_start|>", "<|im_start|>", "\n"]
-    unmask_tokens_idx =  [198, im_start, im_end]
-    nl_tokens = tokenizer("\n").input_ids
-
-    chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
-    tokenizer.chat_template = chat_template
-
-    # _system = tokenizer("system").input_ids + nl_tokens
-    # _user = tokenizer("user").input_ids + nl_tokens
-    # _assistant = tokenizer("assistant").input_ids + nl_tokens
-
-    # Apply prompt templates
-    input_ids, targets = [], []
-    for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != roles["human"]:
-            source = source[1:]
-
-        input_id, target = [], []
-
-        # New version, use apply chat template
-        # Build system message for each sentence
-        input_id += tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}],tokenize = False)
-        target += [IGNORE_INDEX] * len(input_id)
-
-        for conv in source:
-            # Make sure llava data can load
-            try:
-                role = conv["role"]
-                content = conv["content"]
-            except:
-                role = conv["from"]
-                content = conv["value"]
-
-            role =  roles.get(role, role)
-
-            conv = [{"role" : role, "content" : content}]
-            encode_id = tokenizer.apply_chat_template(conv)
-            input_id += encode_id
-            if role in ["user", "system"]:
-                target += [IGNORE_INDEX] * len(encode_id)
+    input_ids = []
+    
+    for source in sources:
+        # Combine messages into single string
+        input_id = ""
+        for i, message in enumerate(source):
+            if message['from'] != 'human' and i == 0:
+                continue
+            input_id += roles[message['from']] + " " + message['value'] + "\n"
+        
+        # Remove the last newline
+        if input_id.endswith('\n'):
+            input_id = input_id[:-1]
+            
+        # Split the text into parts, separating image tags
+        parts = []
+        current_pos = 0
+        
+        while True:
+            img_start = input_id.find("<image>", current_pos)
+            if img_start == -1:
+                # Add remaining text if any
+                if current_pos < len(input_id):
+                    parts.append(("text", input_id[current_pos:]))
+                break
+                
+            # Add text before image tag if any
+            if img_start > current_pos:
+                parts.append(("text", input_id[current_pos:img_start]))
+                
+            # Add image token
+            parts.append(("image", None))
+            
+            # Move position to after image tag
+            current_pos = img_start + len("<image>")
+        
+        # Process each part and build final token list
+        final_tokens = []
+        
+        for part_type, part_text in parts:
+            if part_type == "image":
+                final_tokens.append(IMAGE_TOKEN_INDEX)
             else:
-                target += encode_id
+                NEWLINE_TOKEN = 198
+                # Replace \n with NEWLINE_TOKEN
+                text_parts = part_text.split('\n')
+                for i, text_part in enumerate(text_parts):
+                    if text_part:  # Only process non-empty text
+                        tokens, *_ = semantic_tokenizer.generate_semantic_tokens(text_part)
+                        tokens_list = tokens[0].cpu().tolist()
+                        # tokens = tokenizer(text_part)  # Assume this returns a list of integers
+                        final_tokens.extend(tokens)
+                    if i < len(text_parts) - 1:  # Add newline token between parts, but not at the end
+                        final_tokens.append(NEWLINE_TOKEN)
+        
+        input_ids.append(final_tokens)
 
-
-
-        assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
-        for idx, encode_id in enumerate(input_id):
-            if encode_id in unmask_tokens_idx:
-                target[idx] = encode_id
-            if encode_id == image_token_index: #<image>
-                input_id[idx] = IMAGE_TOKEN_INDEX #-300
-        input_ids.append(input_id)
-        targets.append(target)
     input_ids = torch.tensor(input_ids, dtype=torch.long)
-    targets = torch.tensor(targets, dtype=torch.long)
-    del tokenizer
+
+    # Adjust targets to match input_ids length for each example
+    adjusted_targets = []
+    for i in range(len(input_ids)):
+        input_len = len(input_ids[i])
+        if len(targets[i]) > input_len:
+            # Truncate targets if longer
+            adjusted_targets.append(targets[i][:input_len])
+        else:
+            # Pad targets with IGNORE_INDEX if shorter
+            padding = [IGNORE_INDEX] * (input_len - len(targets[i]))
+            adjusted_targets.append(targets[i] + padding)    
+
+        assert len(input_ids[i]) == len(targets[i]), f"{len(input_ids[i])} != {len(targets[i])}"
+
+    input_ids = torch.tensor(input_ids, dtype=torch.long)
+    targets = torch.tensor(adjusted_targets, dtype=torch.long)    
+
     return dict(
         input_ids=input_ids,  # tensor(bs x seq_len)
         labels=targets,  # tensor(bs x seq_len)
     )
-
 
 def preprocess_plain(
     sources: Sequence[str],

@@ -12,7 +12,7 @@ def preprocess_qwen(sources, tokenizer, has_image: bool = False, max_len=2048, s
             if message['from'] != 'human' and i == 0:
                 continue
             input_id += roles[message['from']] + " " + message['value'] + "\n"
-            
+        
         # Remove the last newline
         if input_id.endswith('\n'):
             input_id = input_id[:-1]
@@ -57,7 +57,7 @@ def preprocess_qwen(sources, tokenizer, has_image: bool = False, max_len=2048, s
         
         processed_ids.append(final_tokens)
     
-    return processed_ids
+    return processed_ids #Actual preprocess_qwen expects data_dict of input ids and labels
 
 class MockTokenizer:
     def __init__(self):
@@ -117,13 +117,18 @@ class MockTokenizer:
 if __name__ == "__main__":
     sources = [
         [
-            {"from": "human", "value": "<image> What's in this image?"}, 
+            {"from": "human", "value": "<image><image><image>What's in this image?"}, 
+            {"from": "gpt", "value": "I see a dog playing in the park."},
+            {"from": "human", "value": "<image><image><image>What's in this image?"}, 
             {"from": "gpt", "value": "I see a dog playing in the park."}
         ],
+
         [
-            {"from": "human", "value": "<image> What's in this image?"}, 
+            {"from": "human", "value": "<image><image><image>What's in this image?"}, 
+            {"from": "gpt", "value": "I see a dog playing in the park."},
+            {"from": "human", "value": "<image><image><image>What's in this image?"}, 
             {"from": "gpt", "value": "I see a dog playing in the park."}
-        ]    
+        ],        
     ]
 
     tokenizer = MockTokenizer()
@@ -150,8 +155,8 @@ if __name__ == "__main__":
         special_tokens = {-300: "<image>", 198: "\\n"}
         token_to_word = {v: k for k, v in tokenizer.token_map.items()}
         
-        for token in tokens:
-            if token in special_tokens:
-                print(f"{token}: {special_tokens[token]}")
-            else:
-                print(f"{token}: {token_to_word.get(token, 'Unknown')}")
+        # for token in tokens:
+        #     if token in special_tokens:
+        #         print(f"{token}: {special_tokens[token]}")
+        #     else:
+        #         print(f"{token}: {token_to_word.get(token, 'Unknown')}")
