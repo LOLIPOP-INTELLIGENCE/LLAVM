@@ -557,8 +557,6 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
         
         input_ids.append(final_tokens)
 
-    input_ids = torch.tensor(input_ids, dtype=torch.long)
-
     # Adjust targets to match input_ids length for each example
     adjusted_targets = []
     for i in range(len(input_ids)):
@@ -1128,6 +1126,24 @@ def train(attn_implementation=None):
         )
 
     model = get_model(model_args, training_args, bnb_model_from_pretrained_args)
+    # Add this block after model initialization to freeze everything except audio modules
+    # First freeze all parameters
+    model.requires_grad_(False)
+    
+    # Unfreeze only audio processing modules
+    model.get_model().t2e.requires_grad_(True)  # TokensToEmbeddings
+    model.get_model().audio_projector.requires_grad_(True)  # SemanticProjection
+    
+    # Keep embeddings and all other modules frozen
+    model.get_model().embed_tokens.requires_grad_(False)
+    
+    # Print trainable vs frozen parameters for verification
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    rank0_print(f"Total parameters: {total_params}")
+    rank0_print(f"Trainable parameters: {trainable_params}")
+    rank0_print(f"Percentage of trainable parameters: {100 * trainable_params / total_params:.2f}%")
+
     model.config.use_cache = False
     if model_args.rope_scaling_factor is not None and model_args.rope_scaling_type is not None:
         model.config.rope_scaling = {

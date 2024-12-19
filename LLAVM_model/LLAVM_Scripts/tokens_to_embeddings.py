@@ -1,6 +1,7 @@
 import torch
 from whisperspeech.t2s_up_wds_mlang_enclm import TSARTransformer
 
+
 class TokensToEmbeddings:
     def __init__(self, model_path="collabora/whisperspeech:t2s-v1.9-medium-7lang.model"):
         # Initialize model
@@ -8,8 +9,9 @@ class TokensToEmbeddings:
         self.model.eval()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-
-    def convert_to_embeddings(self, semantic_tokens, ttoks, langs, cpss):
+        self.codebook = self.model.embeddings.embedding.main.weight #Codebook
+    @torch.no_grad()
+    def convert_to_embeddings(self, semantic_tokens):
         """
         Convert semantic tokens to embeddings
         
@@ -24,14 +26,13 @@ class TokensToEmbeddings:
         """
         with torch.no_grad():
             # Get encoder output for dtype matching
-            xenc, _, cps_emb = self.model.run_encoder(ttoks, langs, cpss)
-            
-            # Convert tokens to embeddings
-            semantic_embeddings, _ = self.model.embeddings(semantic_tokens, xenc, cps_emb)
-            print(f"Semantic embeddings shape: {semantic_embeddings.shape}")
-            
-            return semantic_embeddings
+            if not isinstance(semantic_tokens, torch.Tensor):
+                raise ValueError("semantic_tokens must be a torch.Tensor")
+            semantic_tokens = semantic_tokens.to(self.device)
 
+            #Use codebook to look up embeddings
+            continuous_embeddings = self.codebook[semantic_tokens]
+            return continuous_embeddings
 # Example usage showing how to use both classes together
 if __name__ == "__main__":
     from text_to_tokens import TextToTokens
@@ -45,5 +46,6 @@ if __name__ == "__main__":
     tokens, ttoks, cpss, langs = token_converter.generate_semantic_tokens(text)
     
     # Convert tokens to embeddings
-    embeddings = embedding_converter.convert_to_embeddings(tokens, ttoks, langs, cpss)
+    embeddings = embedding_converter.convert_to_embeddings(tokens)
     print(f"Generated embeddings for '{text}'")
+    import pdb; pdb.set_trace()
